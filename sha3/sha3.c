@@ -10,6 +10,129 @@
 #include "utils.h"
 #include "sha3.h"
 
+/*
+1. b：置换宽度
+b 是 KECCAK-p 置换的状态总宽度，单位是 bit。标准允许的取值是
+{25, 50, 100, 200, 400, 800, 1600}。
+SHA-3 / SHAKE 实际用的是 b = 1600。
+你可以把它理解成：
+整个内部状态一共有 1600 个 bit。
+
+2. w：lane size
+w = b / 25，表示每个 lane 的位宽。
+当 b = 1600 时，w = 64。
+
+直观上：
+状态被分成 25 个 lane
+每个 lane 是 64 bit
+所以总共 25 × 64 = 1600 bit
+这就是为什么实现里常用 25 个 uint64_t 来存状态。
+
+3. l：lane size 的二进制对数
+l = log2(w)。
+当 w = 64 时，l = 6。
+这个参数本身不直接参与吸收和输出，但它决定了轮数公式。
+
+4. nr：轮数
+nr 是 KECCAK-p[b, nr] 的 round 数。
+对 SHA-3 使用的 KECCAK-p[1600,24]，有：
+nr = 12 + 2l = 12 + 2×6 = 24。
+
+所以：
+一次完整的 Keccak-f[1600] 置换要做 24 轮
+每一轮都执行 θ -> ρ -> π -> χ -> ι
+
+5. A：state array
+A 表示状态数组。标准把状态写成一个 5 × 5 × w 的三维数组，元素写成：
+A[x, y, z]
+其中：
+x：0 到 4
+y：0 到 4
+z：0 到 w-1。
+这就是你看到规范里总写 A[x,y,z] 的原因。
+
+6. Lane(i,j)、Plane(j)、state string S
+规范除了用三维数组，也允许把状态写成一个长度为 b 的 bit string S。
+并定义了：
+Lane(i,j)：固定 (x=i,y=j) 的整条 lane
+Plane(j)：固定 y=j 的一个 plane
+S：把所有 plane/lane 按固定顺序拼起来的状态字符串。
+这几个概念的作用是：
+帮你把“数学上的 3D 状态”映射到“程序里的线性内存”。
+
+7. r：rate
+r 是 sponge construction 里的 rate，表示：
+每次 absorb 能处理多少输入 bit
+每次 squeeze 能拿出多少输出 bit。
+它决定：
+输入块大小
+输出块大小
+
+8. c：capacity
+c 是 sponge construction 里的 capacity。标准定义它为：
+capacity = width - rate。
+也就是：
+c = b - r
+所以 r 和 c 不是独立的；b 固定后，一个定了，另一个也就定了。
+直觉上：
+r 越大，吞吐越高
+c 越大，安全裕量越高
+
+9. f
+f 是 sponge construction 的底层置换函数。
+对 SHA-3 而言，它就是：
+KECCAK-p[1600,24]，也就是通常说的 Keccak-f[1600]。
+
+10. pad
+pad 是 padding rule。
+SHA-3 使用的是：pad10*1。
+它的形式是：
+1 || 0^j || 1
+作用是把输入补到 r 的整数倍长度。
+
+11. N
+N 是进入 sponge 的输入串。
+注意它不一定等于原始消息 M，因为实际进入 sponge 前要先做 域分离后缀拼接。
+比如：
+SHA3-256：N = M || 01
+SHAKE256：N = M || 1111
+
+12. M
+M 是用户原始输入消息。
+标准里所有 SHA-3 / SHAKE 都把原始输入写成 M。
+
+13. d
+d 有两个含义，取决于函数类型：
+对 SHA3-224 / 256 / 384 / 512，d 表示 digest length
+对 SHAKE128 / SHAKE256，d 表示 请求输出长度。
+所以：
+SHA3-256 里 d=256 是固定的
+SHAKE256(M,d) 里 d 是你自己指定的
+
+14. ir
+ir 是 round index。
+它只在 ι 步里用来选择 round constant。
+也就是第 0 轮、第 1 轮……第 23 轮。
+
+15. RC
+RC 是 round constant。
+每一轮最后的 ι 步都会把对应轮常量异或到状态里。
+*/
+
+/*
+SHAKE128
+c = 256
+r = 1344
+输出长度 d 可变
+后缀: 1111。
+
+SHAKE256
+c = 512
+r = 1088
+输出长度 d 可变
+后缀: 1111。
+*/
+
 //#define DEBUG
 
 #ifdef DEBUG
